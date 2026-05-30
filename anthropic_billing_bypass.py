@@ -11,6 +11,14 @@ ports its bypass behaviors to Python.
 
 Version history
 ---------------
+- 1.5.3 (2026-05-30): Fix: _split_tool_results_from_followup_user_text
+  no longer strips thinking blocks from the assistant message during
+  interrupted tool-turn repair.  The stripping triggered Anthropic's
+  "thinking blocks cannot be modified" 400, and the standard recovery
+  path (strip reasoning_details → retry) would hit the same error again
+  because the bypass re-stripped on every retry.  The assistant is now
+  preserved byte-for-byte; Hermes core's _manage_thinking_signatures
+  handles non-latest-assistant thinking blocks on the next turn.
 - 1.5.1 (2026-05-30): Classify Anthropic's newer "latest assistant thinking
   blocks cannot be modified" 400 as recoverable thinking replay failure.
 - 1.5.0 (2026-05-06): Fix literal ``\\n`` escapes in system-reminder text,
@@ -39,7 +47,7 @@ References
 
 from __future__ import annotations
 
-__version__ = "1.5.1"
+__version__ = "1.5.3"
 
 import hashlib
 import inspect
@@ -638,23 +646,15 @@ def _split_tool_results_from_followup_user_text(
                     seen_non_result = True
                     rest.append(block)
             if leading_results and rest:
-                # This is an interrupted/failed tool turn.  Its signed thinking
-                # blocks may no longer validate once Hermes had to repair the
-                # turn boundary, so drop only those private blocks while
-                # preserving user-visible text and tool_use blocks.
-                if isinstance(prev_content, list):
-                    repaired[-1] = {
-                        **prev,
-                        "content": [
-                            block
-                            for block in prev_content
-                            if not (
-                                isinstance(block, dict)
-                                and block.get("type") in {"thinking", "redacted_thinking"}
-                            )
-                        ]
-                        or [{"type": "text", "text": "(thinking elided for repaired tool turn)"}],
-                    }
+                # Interrupted/failed tool turn — the assistant + tool_result
+                # boundary was merged with later user text by Hermes's role
+                # alternation logic.  Split them apart WITHOUT modifying the
+                # assistant content so Anthropic's thinking-block integrity
+                # check does not reject the request.  Hermes core's
+                # _manage_thinking_signatures will strip thinking blocks from
+                # non-latest assistant messages on the next turn, and the
+                # standard thinking_signature recovery path handles any
+                # signature validation failures on this turn.
                 repaired.append({**msg, "content": leading_results})
                 repaired.append(
                     {
