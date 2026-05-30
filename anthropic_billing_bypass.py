@@ -142,6 +142,29 @@ def _unwrap_tool_name(name: Any) -> Any:
     return name
 
 
+def _has_thinking_block(msg: Dict[str, Any]) -> bool:
+    """Return True if the message contains a ``thinking`` or ``redacted_thinking`` block.
+
+    Anthropic API (Claude 4.x / 3.7 Sonnet with thinking) enforces strict
+    content-integrity on assistant messages that include thinking blocks.
+    Mutating these messages in any way triggers HTTP 400 with the error:
+    "thinking or redacted_thinking blocks in the latest assistant message
+    cannot be modified."
+    """
+    if not isinstance(msg, dict) or msg.get("role") != "assistant":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if isinstance(block, dict) and block.get("type") in (
+            "thinking",
+            "redacted_thinking",
+        ):
+            return True
+    return False
+
+
 def _rewrite_tool_names(api_kwargs: Dict[str, Any]) -> None:
     tools = api_kwargs.get("tools")
     if isinstance(tools, list):
@@ -153,6 +176,10 @@ def _rewrite_tool_names(api_kwargs: Dict[str, Any]) -> None:
     if isinstance(messages, list):
         for msg in messages:
             if not isinstance(msg, dict):
+                continue
+            # Never mutate assistant messages that contain thinking blocks —
+            # Anthropic enforces strict content-integrity on them.
+            if _has_thinking_block(msg):
                 continue
             content = msg.get("content")
             if not isinstance(content, list):
@@ -324,6 +351,10 @@ def _repair_tool_pairs(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     can leave these orphans behind; this function removes them and drops
     messages whose content becomes empty as a result.
 
+    Messages containing ``thinking`` / ``redacted_thinking`` blocks are
+    preserved untouched — Anthropic enforces strict content-integrity on
+    them and will reject any mutation (HTTP 400).
+
     Mirrors upstream ``src/transforms.ts::repairToolPairs``.  Returns the
     original list when nothing needs repairing so callers can detect a no-op
     via identity comparison.
@@ -336,6 +367,9 @@ def _repair_tool_pairs(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     for msg in messages:
         if not isinstance(msg, dict):
+            continue
+        # Skip messages with thinking blocks — they must be preserved as-is.
+        if _has_thinking_block(msg):
             continue
         content = msg.get("content")
         if not isinstance(content, list):
@@ -361,6 +395,10 @@ def _repair_tool_pairs(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     repaired: List[Dict[str, Any]] = []
     for msg in messages:
         if not isinstance(msg, dict):
+            repaired.append(msg)
+            continue
+        # Preserve messages with thinking blocks as-is — no mutation allowed.
+        if _has_thinking_block(msg):
             repaired.append(msg)
             continue
         content = msg.get("content")
