@@ -102,21 +102,27 @@ printf "${GREEN}[✓] Copied patch to %s/${RESET}\n" "$PATCHES_DIR"
 # If antigravity's sitecustomize is already present, don't touch it —
 # it already includes the Claude Code hook.
 ANTIGRAVITY_MARKER="# hermes-antigravity managed"
+SITECUSTOMIZE_INSTALLED=false
 if [ ! -f "$SITECUSTOMIZE" ]; then
     cp "$SCRIPT_DIR/sitecustomize_hook.py" "$SITECUSTOMIZE"
+    SITECUSTOMIZE_INSTALLED=true
 elif grep -q "$ANTIGRAVITY_MARKER" "$SITECUSTOMIZE" 2>/dev/null; then
     printf "${GREEN}[✓] Antigravity sitecustomize already present (includes Claude hook)${RESET}\n"
 elif grep -q "$MARKER" "$SITECUSTOMIZE"; then
     cp "$SCRIPT_DIR/sitecustomize_hook.py" "$SITECUSTOMIZE"
+    SITECUSTOMIZE_INSTALLED=true
 else
     BACKUP="$SITECUSTOMIZE.pre-hermes-claude-auth"
     cp "$SITECUSTOMIZE" "$BACKUP"
     printf "${YELLOW}[!] Backed up existing sitecustomize.py to %s${RESET}\n" "$BACKUP"
     cp "$SCRIPT_DIR/sitecustomize_hook.py" "$SITECUSTOMIZE"
+    SITECUSTOMIZE_INSTALLED=true
 fi
 
-chmod 644 "$SITECUSTOMIZE"
-printf "${GREEN}[✓] Installed hook into %s${RESET}\n" "$SITECUSTOMIZE"
+if $SITECUSTOMIZE_INSTALLED; then
+    chmod 644 "$SITECUSTOMIZE"
+    printf "${GREEN}[✓] Installed hook into %s${RESET}\n" "$SITECUSTOMIZE"
+fi
 
 # ── Verify patch ────────────────────────────────────────────────────
 PATCH_CHECK=$("$VENV_PYTHON" -c "

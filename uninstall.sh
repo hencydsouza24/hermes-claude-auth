@@ -92,6 +92,13 @@ if [ "$PURGE" -eq 1 ]; then
       rmdir "$PATCH_DIR" 2>/dev/null || true
     fi
   fi
+
+  # Remove auto-recovery git hook
+  HOOK_FILE="$HOME/.hermes/hermes-agent/.git/hooks/post-merge"
+  if [ -f "$HOOK_FILE" ] && grep -q "hermes-post-update" "$HOOK_FILE" 2>/dev/null; then
+    rm -f "$HOOK_FILE"
+    printf '%b[✓]%b Removed auto-recovery hook (post-merge)\n' "$GREEN" "$RESET"
+  fi
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
