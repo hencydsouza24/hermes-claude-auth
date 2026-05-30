@@ -12,6 +12,7 @@ from anthropic_billing_bypass import (
     _model_disables_effort,
     _pascalcase_mcp_name,
     _repair_tool_pairs,
+    _split_tool_results_from_followup_user_text,
     _strip_effort,
     _unwrap_tool_name,
     _wrap_tool_name,
@@ -209,6 +210,101 @@ def test_apply_claude_code_bypass_rewrites_tool_names_to_hermes_namespace(
     assistant_msg = basic_api_kwargs["messages"][1]
     tool_use_block = assistant_msg["content"][0]
     assert tool_use_block["name"] == "mcp__hermes__Bash"
+
+
+def test_apply_claude_code_bypass_rewraps_tool_use_in_thinking_message():
+    thinking_block = {"type": "thinking", "thinking": "private", "signature": "sig"}
+    api_kwargs = {
+        "system": "plain",
+        "model": "claude-opus-4-8",
+        "tools": [{"name": "terminal"}],
+        "messages": [
+            {"role": "user", "content": "please use a tool"},
+            {
+                "role": "assistant",
+                "content": [
+                    thinking_block,
+                    {"type": "tool_use", "id": "tool_1", "name": "terminal", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tool_1", "content": "ok"},
+                ],
+            },
+        ],
+    }
+
+    apply_claude_code_bypass(api_kwargs, "2.1.112")
+
+    assistant_content = api_kwargs["messages"][1]["content"]
+    assert assistant_content[0] is thinking_block
+    assert assistant_content[0] == thinking_block
+    assert assistant_content[1]["name"] == "mcp__hermes__Terminal"
+
+
+def test_split_tool_results_from_followup_user_text_inserts_bridge():
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "private", "signature": "sig"},
+                {"type": "tool_use", "id": "tool_1", "name": "terminal", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tool_1", "content": "ok"},
+                {"type": "text", "text": "new prompt after failed tool turn"},
+            ],
+        },
+    ]
+
+    repaired = _split_tool_results_from_followup_user_text(messages)
+
+    assert repaired is not messages
+    assert [msg["role"] for msg in repaired] == ["assistant", "user", "assistant", "user"]
+    assert repaired[1]["content"] == [
+        {"type": "tool_result", "tool_use_id": "tool_1", "content": "ok"}
+    ]
+    assert repaired[2]["content"][0]["type"] == "text"
+    assert repaired[3]["content"] == [
+        {"type": "text", "text": "new prompt after failed tool turn"}
+    ]
+
+
+def test_apply_claude_code_bypass_splits_merged_tool_result_and_followup_text():
+    api_kwargs = {
+        "system": "plain",
+        "model": "claude-opus-4-8",
+        "messages": [
+            {"role": "user", "content": "start"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "private", "signature": "sig"},
+                    {"type": "tool_use", "id": "tool_1", "name": "terminal", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tool_1", "content": "ok"},
+                    {"type": "text", "text": "new prompt"},
+                ],
+            },
+        ],
+    }
+
+    apply_claude_code_bypass(api_kwargs, "2.1.112")
+
+    roles = [msg["role"] for msg in api_kwargs["messages"]]
+    assert roles == ["user", "assistant", "user", "assistant", "user"]
+    assert api_kwargs["messages"][2]["content"][0]["type"] == "tool_result"
+    assert api_kwargs["messages"][3]["content"][0]["type"] == "text"
+    assert api_kwargs["messages"][4]["content"][0]["text"] == "new prompt"
 
 
 def test_apply_claude_code_bypass_injects_stainless_and_direct_browser_headers(

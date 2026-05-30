@@ -177,15 +177,18 @@ def _rewrite_tool_names(api_kwargs: Dict[str, Any]) -> None:
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
-            # Never mutate assistant messages that contain thinking blocks —
-            # Anthropic enforces strict content-integrity on them.
-            if _has_thinking_block(msg):
-                continue
             content = msg.get("content")
             if not isinstance(content, list):
                 continue
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
+                    # Hermes stores tool calls under its local names after the
+                    # response normalizer unwraps Claude Code's
+                    # mcp__hermes__Foo namespace.  When a response also carries
+                    # signed thinking blocks, replaying the unwrapped name makes
+                    # Anthropic report that the thinking-bearing assistant
+                    # message was modified.  Re-wrap only the tool_use name;
+                    # never touch thinking/redacted_thinking blocks themselves.
                     block["name"] = _wrap_tool_name(block.get("name") or "")
 
 
@@ -505,6 +508,96 @@ def _repair_tool_pairs(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return repaired
 
 
+def _split_tool_results_from_followup_user_text(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Split merged tool-result user turns from later natural user text.
+
+    Hermes's Anthropic adapter merges consecutive user messages to enforce role
+    alternation.  If an assistant tool-use turn failed before producing the next
+    assistant response, the stored history can become:
+
+        assistant(thinking + tool_use), user(tool_result..., text new prompt)
+
+    For signed Anthropic thinking, that text was not part of the original
+    tool-result continuation and can make the server report that the thinking
+    block was modified.  Split it into a completed tool-result turn, a small
+    synthetic assistant bridge, then the later user text.
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    changed = False
+    repaired: List[Dict[str, Any]] = []
+    for msg in messages:
+        if (
+            repaired
+            and isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and isinstance(msg.get("content"), list)
+        ):
+            prev = repaired[-1]
+            prev_content = prev.get("content") if isinstance(prev, dict) else None
+            prev_has_tool_use = (
+                isinstance(prev, dict)
+                and prev.get("role") == "assistant"
+                and isinstance(prev_content, list)
+                and any(
+                    isinstance(block, dict) and block.get("type") == "tool_use"
+                    for block in prev_content
+                )
+            )
+            content = msg["content"]
+            leading_results: List[Any] = []
+            rest: List[Any] = []
+            seen_non_result = False
+            for block in content:
+                is_tool_result = (
+                    isinstance(block, dict) and block.get("type") == "tool_result"
+                )
+                if prev_has_tool_use and is_tool_result and not seen_non_result:
+                    leading_results.append(block)
+                else:
+                    seen_non_result = True
+                    rest.append(block)
+            if leading_results and rest:
+                # This is an interrupted/failed tool turn.  Its signed thinking
+                # blocks may no longer validate once Hermes had to repair the
+                # turn boundary, so drop only those private blocks while
+                # preserving user-visible text and tool_use blocks.
+                if isinstance(prev_content, list):
+                    repaired[-1] = {
+                        **prev,
+                        "content": [
+                            block
+                            for block in prev_content
+                            if not (
+                                isinstance(block, dict)
+                                and block.get("type") in {"thinking", "redacted_thinking"}
+                            )
+                        ]
+                        or [{"type": "text", "text": "(thinking elided for repaired tool turn)"}],
+                    }
+                repaired.append({**msg, "content": leading_results})
+                repaired.append(
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "[Hermes repair: previous tool turn ended without an assistant response.]",
+                            }
+                        ],
+                    }
+                )
+                repaired.append({**msg, "content": rest})
+                changed = True
+                continue
+        repaired.append(msg)
+
+    return repaired if changed else messages
+
+
 # ---------------------------------------------------------------------------
 # Effort stripping for haiku (upstream PR #126)
 # ---------------------------------------------------------------------------
@@ -637,6 +730,11 @@ def apply_claude_code_bypass(api_kwargs: Dict[str, Any], version: str) -> None:
     if repaired is not messages:
         api_kwargs["messages"] = repaired
         messages = repaired
+
+    split_messages = _split_tool_results_from_followup_user_text(messages)
+    if split_messages is not messages:
+        api_kwargs["messages"] = split_messages
+        messages = split_messages
 
     raw_system = api_kwargs.get("system")
     if raw_system is None:
