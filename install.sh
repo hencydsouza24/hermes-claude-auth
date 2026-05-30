@@ -76,11 +76,28 @@ if $CHECK_ONLY; then
         ALL_OK=false
     fi
 
+    # ── Content drift check: installed patch must match this repo ───────
+    # File-existence alone does not catch the case where a runtime hotfix
+    # was applied to the installed copy but never synced back to the repo
+    # (or vice-versa). Compare byte-for-byte and warn on any drift.
+    # NOTE: sitecustomize.py is intentionally NOT compared — it is shared
+    # with other provider patches (e.g. Antigravity) and legitimately
+    # diverges from this repo's single-provider hook.
+    INSTALLED_PATCH="$PATCHES_DIR/anthropic_billing_bypass.py"
+    REPO_PATCH="$SCRIPT_DIR/anthropic_billing_bypass.py"
+    if [[ -f "$INSTALLED_PATCH" && -f "$REPO_PATCH" ]]; then
+        if ! cmp -s "$INSTALLED_PATCH" "$REPO_PATCH"; then
+            printf "${YELLOW}[!] DRIFT: anthropic_billing_bypass.py differs from repo (%s)${RESET}\n" "$REPO_PATCH"
+            ALL_OK=false
+        fi
+    fi
+
     if $ALL_OK; then
         printf "\n${GREEN}Claude Code bypass patches intact.${RESET}\n"
         exit 0
     else
-        printf "\n${YELLOW}Some patches missing. Run: ./scripts/install.sh --post-update${RESET}\n"
+        printf "\n${YELLOW}Patches missing or drifted. To restore from repo: ./install.sh${RESET}\n"
+        printf "${YELLOW}If the installed copy is the newer one, sync it back to the repo and commit instead.${RESET}\n"
         exit 1
     fi
 fi
