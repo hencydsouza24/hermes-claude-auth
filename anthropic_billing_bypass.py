@@ -11,6 +11,10 @@ ports its bypass behaviors to Python.
 
 Version history
 ---------------
+- 1.5.4 (2026-05-30): Fix: _rewrite_tool_names skips messages carrying
+  signed thinking/redacted_thinking blocks to prevent HTTP 400 "cannot
+  be modified" on Anthropic replay.  Even wrapping a tool_use name
+  mutates the byte content and invalidates the cryptographic signature.
 - 1.5.3 (2026-05-30): Fix: _split_tool_results_from_followup_user_text
   no longer strips thinking blocks from the assistant message during
   interrupted tool-turn repair.  The stripping triggered Anthropic's
@@ -47,7 +51,7 @@ References
 
 from __future__ import annotations
 
-__version__ = "1.5.3"
+__version__ = "1.5.4"
 
 import hashlib
 import inspect
@@ -186,6 +190,13 @@ def _rewrite_tool_names(api_kwargs: Dict[str, Any]) -> None:
     if isinstance(messages, list):
         for msg in messages:
             if not isinstance(msg, dict):
+                continue
+            # Never mutate messages that carry signed thinking /
+            # redacted_thinking blocks — even re-wrapping a tool_use
+            # name inside the same message changes the byte-level
+            # content and invalidates Anthropic's cryptographic
+            # signature, producing HTTP 400 "cannot be modified".
+            if _has_thinking_block(msg):
                 continue
             content = msg.get("content")
             if not isinstance(content, list):
