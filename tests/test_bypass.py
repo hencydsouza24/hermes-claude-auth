@@ -310,6 +310,50 @@ def test_repair_tool_pairs_returns_input_when_nothing_to_repair():
     assert repaired is messages  # identity-preserving no-op
 
 
+def test_repair_tool_pairs_counts_tool_use_inside_thinking_message():
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "private", "signature": "sig"},
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+        },
+    ]
+
+    repaired = _repair_tool_pairs(messages)
+
+    assert repaired is messages
+
+
+def test_repair_tool_pairs_synthesizes_result_for_orphaned_thinking_tool_use():
+    thinking_block = {"type": "thinking", "thinking": "private", "signature": "sig"}
+    tool_use_block = {"type": "tool_use", "id": "t_missing", "name": "bash", "input": {}}
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        {"role": "assistant", "content": [thinking_block, tool_use_block]},
+        {"role": "user", "content": [{"type": "text", "text": "next request"}]},
+    ]
+
+    repaired = _repair_tool_pairs(messages)
+
+    assert repaired[1]["content"] is messages[1]["content"]
+    assert repaired[1]["content"] == [thinking_block, tool_use_block]
+    next_user_blocks = repaired[2]["content"]
+    assert next_user_blocks[0] == {
+        "type": "tool_result",
+        "tool_use_id": "t_missing",
+        "content": "[Hermes repair: missing tool result synthesized for an earlier tool_use.]",
+        "is_error": True,
+    }
+    assert next_user_blocks[1] == {"type": "text", "text": "next request"}
+
+
 def test_apply_claude_code_bypass_repairs_tool_pairs_before_signing(simple_messages):
     api_kwargs = {
         "system": "p",

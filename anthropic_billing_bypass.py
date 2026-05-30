@@ -344,20 +344,22 @@ def _merge_spoof_extras(api_kwargs: Dict[str, Any]) -> None:
 
 
 def _repair_tool_pairs(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Strip orphaned ``tool_use`` / ``tool_result`` blocks.
+    """Repair orphaned ``tool_use`` / ``tool_result`` blocks.
 
     Anthropic rejects requests where a ``tool_use`` has no matching
     ``tool_result`` (or vice versa).  Long conversations or partial summaries
-    can leave these orphans behind; this function removes them and drops
-    messages whose content becomes empty as a result.
+    can leave these orphans behind.
 
-    Messages containing ``thinking`` / ``redacted_thinking`` blocks are
-    preserved untouched — Anthropic enforces strict content-integrity on
-    them and will reject any mutation (HTTP 400).
+    Normal messages are repaired by stripping orphaned blocks.  Assistant
+    messages containing ``thinking`` / ``redacted_thinking`` blocks are
+    preserved byte-for-byte at the content level — Anthropic enforces strict
+    content-integrity on them and rejects mutation (HTTP 400).  If such an
+    immutable assistant message contains an orphaned ``tool_use``, synthesize
+    an error ``tool_result`` in the immediately following user message instead
+    of editing the assistant content.
 
-    Mirrors upstream ``src/transforms.ts::repairToolPairs``.  Returns the
-    original list when nothing needs repairing so callers can detect a no-op
-    via identity comparison.
+    Returns the original list when nothing needs repairing so callers can
+    detect a no-op via identity comparison.
     """
     if not isinstance(messages, list):
         return messages
@@ -389,27 +391,58 @@ def _repair_tool_pairs(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not orphaned_uses and not orphaned_results:
         return messages
 
-    repaired: List[Dict[str, Any]] = []
+    thinking_orphaned_uses: Set[str] = set()
     for msg in messages:
-        if not isinstance(msg, dict):
-            repaired.append(msg)
-            continue
-        # Preserve messages with thinking blocks as-is — no mutation allowed.
-        if _has_thinking_block(msg):
-            repaired.append(msg)
+        if not isinstance(msg, dict) or not _has_thinking_block(msg):
             continue
         content = msg.get("content")
         if not isinstance(content, list):
-            repaired.append(msg)
             continue
-        filtered: List[Any] = []
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            bid = block.get("id")
+            if isinstance(bid, str) and bid in orphaned_uses:
+                thinking_orphaned_uses.add(bid)
+
+    removable_orphaned_uses = orphaned_uses - thinking_orphaned_uses
+
+    def _synthetic_tool_result(tool_use_id: str) -> Dict[str, Any]:
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": "[Hermes repair: missing tool result synthesized for an earlier tool_use.]",
+            "is_error": True,
+        }
+
+    def _filtered_message(
+        msg: Dict[str, Any], prepend_results_for: List[str] | None = None
+    ) -> Dict[str, Any] | None:
+        prepend_results_for = prepend_results_for or []
+        synthetic_results = [_synthetic_tool_result(tid) for tid in prepend_results_for]
+        content = msg.get("content")
+
+        if not isinstance(content, list):
+            if synthetic_results and msg.get("role") == "user":
+                if isinstance(content, str):
+                    return {
+                        **msg,
+                        "content": [
+                            *synthetic_results,
+                            {"type": "text", "text": content},
+                        ],
+                    }
+                return {**msg, "content": synthetic_results}
+            return msg
+
+        filtered: List[Any] = [*synthetic_results]
         for block in content:
             if not isinstance(block, dict):
                 filtered.append(block)
                 continue
             if (
                 block.get("type") == "tool_use"
-                and block.get("id") in orphaned_uses
+                and block.get("id") in removable_orphaned_uses
             ):
                 continue
             if (
@@ -419,7 +452,56 @@ def _repair_tool_pairs(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 continue
             filtered.append(block)
         if filtered:
-            repaired.append({**msg, "content": filtered})
+            return {**msg, "content": filtered}
+        return None
+
+    repaired: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if not isinstance(msg, dict):
+            repaired.append(msg)
+            i += 1
+            continue
+
+        if _has_thinking_block(msg):
+            # Preserve thinking-bearing assistant content exactly as supplied.
+            repaired.append(msg)
+            content = msg.get("content")
+            current_thinking_orphans: List[str] = []
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    bid = block.get("id")
+                    if isinstance(bid, str) and bid in thinking_orphaned_uses:
+                        current_thinking_orphans.append(bid)
+
+            if current_thinking_orphans:
+                next_msg = messages[i + 1] if i + 1 < len(messages) else None
+                if isinstance(next_msg, dict) and next_msg.get("role") == "user":
+                    repaired_next = _filtered_message(next_msg, current_thinking_orphans)
+                    if repaired_next is not None:
+                        repaired.append(repaired_next)
+                    i += 2
+                    continue
+                repaired.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            _synthetic_tool_result(tid)
+                            for tid in current_thinking_orphans
+                        ],
+                    }
+                )
+            i += 1
+            continue
+
+        repaired_msg = _filtered_message(msg)
+        if repaired_msg is not None:
+            repaired.append(repaired_msg)
+        i += 1
+
     return repaired
 
 
