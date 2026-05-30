@@ -368,9 +368,6 @@ def _repair_tool_pairs(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for msg in messages:
         if not isinstance(msg, dict):
             continue
-        # Skip messages with thinking blocks — they must be preserved as-is.
-        if _has_thinking_block(msg):
-            continue
         content = msg.get("content")
         if not isinstance(content, list):
             continue
@@ -712,8 +709,8 @@ def _install_response_pascalcase_unhook(
 
         aa_module.normalize_anthropic_response = patched_normalize
         aa_module._CLAUDE_CODE_RESPONSE_UNHOOK_APPLIED = True  # type: ignore[attr-defined]
-        sys.stderr.write(
-            "[anthropic_billing_bypass] Adapter unwrap hook installed\n"
+        logger.debug(
+            "[anthropic_billing_bypass] Adapter unwrap hook installed"
         )
         any_installed = True
     elif callable(original_normalize) and already_old:
@@ -778,8 +775,8 @@ def _install_response_pascalcase_unhook(
 
                 cls.normalize_response = patched_transport_normalize
                 cls._HERMES_MCP_UNWRAP_APPLIED = True  # type: ignore[attr-defined]
-                sys.stderr.write(
-                    "[anthropic_billing_bypass] Transport unwrap hook installed\n"
+                logger.debug(
+                    "[anthropic_billing_bypass] Transport unwrap hook installed"
                 )
                 any_installed = True
         else:
@@ -865,7 +862,7 @@ def apply_patches(anthropic_adapter_module: Any = None) -> bool:
 
     aa.build_anthropic_kwargs = patched_build
     aa._CLAUDE_CODE_BYPASS_APPLIED = True  # type: ignore[attr-defined]
-    sys.stderr.write("[anthropic_billing_bypass] Bypass installed\n")
+    logger.debug("[anthropic_billing_bypass] Bypass installed")
 
     _install_response_pascalcase_unhook(aa)
     return True
