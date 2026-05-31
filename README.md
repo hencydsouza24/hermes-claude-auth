@@ -165,6 +165,31 @@ Only `sitecustomize.py` needs recovery. `--post-update` does exactly that.
 
   Credit: the macOS Keychain mirror approach was written up by [@DrQbz](https://github.com/DrQbz) in [issue #5](https://github.com/kristianvast/hermes-claude-auth/issues/5) and is now automated in `install.sh`.
 
+- **Gateway fails with `No inference provider configured` / `Provider authentication failed`, but the CLI works fine**: This is a provider auto-resolution problem, *not* a credential problem. The gateway resolves the provider as `auto`, and `auto` only auto-selects an OAuth provider (like Anthropic via `claude_code`) when `~/.hermes/auth.json` has `active_provider` set. The CLI passes `model.provider` from `config.yaml` explicitly, so it bypasses `auto` and keeps working — which is why only the gateway (Telegram/Discord/etc.) breaks.
+
+  This happens when your credentials live in `auth.json`'s `credential_pool` but `active_provider` is `null`. Since Anthropic uses OAuth (no `ANTHROPIC_API_KEY` env var), `auto` finds no env key to fall back on and raises `No inference provider configured`.
+
+  **Fix** — point `active_provider` at your configured provider, then restart the gateway:
+  ```bash
+  python3 - <<'PY'
+  import json, pathlib
+  p = pathlib.Path.home() / '.hermes' / 'auth.json'
+  d = json.loads(p.read_text())
+  d['active_provider'] = 'anthropic'   # match model.provider in config.yaml
+  p.write_text(json.dumps(d, indent=2))
+  print('set active_provider=anthropic')
+  PY
+
+  sudo "$(command -v hermes)" gateway restart --system   # or: hermes gateway restart
+  ```
+
+  > Note: during a `sudo ... gateway restart`, you may see `ModuleNotFoundError: No module named 'antigravity_provider_patch'` printed once. That comes from the sudo wrapper process (its `HOME` is `/root`), not the actual gateway — the systemd unit pins `HOME=/home/<user>`, so the running gateway loads the patches correctly. It is harmless.
+
+  Verify the fix in the gateway's environment:
+  ```bash
+  cd ~/.hermes && hermes auth list   # should show anthropic with the ← active marker
+  ```
+
 ### Billing / routing issues
 
 - **HTTP 400: "Third-party apps now draw from your extra usage, not your plan limits"**: Anthropic's server-side validation has classified your requests as third-party and routed them to pay-per-token credits instead of your Max/Pro plan. Make sure you're on the latest version of this patch (it tracks the upstream [opencode-claude-auth](https://github.com/griffinmartin/opencode-claude-auth) fingerprint changes). Reinstall with `./install.sh` and restart `hermes-gateway`. If the error persists after update, the bypass is currently broken upstream too — track [issue #6](https://github.com/kristianvast/hermes-claude-auth/issues/6) for status.
