@@ -484,6 +484,152 @@ def test_apply_claude_code_bypass_repairs_tool_pairs_before_signing(simple_messa
     assert api_kwargs["messages"][0]["role"] == "user"
 
 
+def test_many_paired_tool_calls_survive_bypass_and_are_namespaced():
+    tool_count = 100
+    assistant_blocks = [
+        {
+            "type": "tool_use",
+            "id": f"tool_{idx}",
+            "name": "mcp_bash" if idx % 2 == 0 else "terminal",
+            "input": {"cmd": f"printf {idx}"},
+        }
+        for idx in range(tool_count)
+    ]
+    result_blocks = [
+        {
+            "type": "tool_result",
+            "tool_use_id": f"tool_{idx}",
+            "content": f"ok {idx}",
+        }
+        for idx in range(tool_count)
+    ]
+    api_kwargs = {
+        "system": "plain",
+        "model": "claude-opus-4-6-20260101",
+        "tools": [{"name": "mcp_bash"}, {"name": "terminal"}],
+        "messages": [
+            {"role": "user", "content": "run many tools"},
+            {"role": "assistant", "content": assistant_blocks},
+            {"role": "user", "content": result_blocks},
+        ],
+    }
+
+    apply_claude_code_bypass(api_kwargs, "2.1.112")
+
+    assistant_after = api_kwargs["messages"][1]["content"]
+    result_after = api_kwargs["messages"][2]["content"]
+    assert len(assistant_after) == tool_count
+    assert len(result_after) == tool_count
+    assert {block["id"] for block in assistant_after} == {
+        block["tool_use_id"] for block in result_after
+    }
+    assert all(
+        block["name"].startswith(_MCP_HERMES_NAMESPACE)
+        for block in assistant_after
+    )
+
+
+def test_large_orphaned_tool_history_is_repaired_without_leftover_orphans():
+    messages = [{"role": "user", "content": [{"type": "text", "text": "start"}]}]
+    expected_ids = set()
+    for turn in range(20):
+        valid_id = f"valid_{turn}"
+        missing_id = f"missing_{turn}"
+        expected_ids.add(valid_id)
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": valid_id, "name": "bash", "input": {}},
+                    {"type": "tool_use", "id": missing_id, "name": "read", "input": {}},
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": valid_id, "content": "ok"},
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": f"stale_{turn}",
+                        "content": "stale",
+                    },
+                ],
+            }
+        )
+
+    repaired = _repair_tool_pairs(messages)
+    seen_uses = {
+        block["id"]
+        for msg in repaired
+        for block in msg.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    }
+    seen_results = {
+        block["tool_use_id"]
+        for msg in repaired
+        for block in msg.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+
+    assert seen_uses == expected_ids
+    assert seen_results == expected_ids
+
+
+def test_many_thinking_orphaned_tool_uses_get_synthetic_results():
+    messages = [{"role": "user", "content": [{"type": "text", "text": "start"}]}]
+    original_assistant_contents = []
+    for turn in range(25):
+        content = [
+            {
+                "type": "thinking",
+                "thinking": f"private {turn}",
+                "signature": f"sig_{turn}",
+            },
+            {
+                "type": "tool_use",
+                "id": f"thinking_tool_{turn}",
+                "name": "terminal",
+                "input": {},
+            },
+        ]
+        original_assistant_contents.append(content)
+        messages.append({"role": "assistant", "content": content})
+        messages.append(
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": f"next {turn}"}],
+            }
+        )
+
+    repaired = _repair_tool_pairs(messages)
+
+    synthetic_results = []
+    preserved_contents = []
+    for msg in repaired:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        if msg.get("role") == "assistant" and any(
+            isinstance(block, dict) and block.get("type") == "thinking"
+            for block in content
+        ):
+            preserved_contents.append(content)
+        synthetic_results.extend(
+            block
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "tool_result"
+            and block.get("is_error") is True
+        )
+
+    assert preserved_contents == original_assistant_contents
+    assert {block["tool_use_id"] for block in synthetic_results} == {
+        f"thinking_tool_{turn}" for turn in range(25)
+    }
+
+
 def test_model_disables_effort_for_haiku():
     assert _model_disables_effort("claude-haiku-3-5")
     assert _model_disables_effort("claude-3-5-haiku-20241022")
